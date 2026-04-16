@@ -13,17 +13,19 @@
 curl -sS -X POST http://localhost:3000/api/conversation/session | jq
 ```
 
-- Expect `200` and a `conversationToken` when env vars are valid.
+- Expect `200` and a `conversationToken` (default WebRTC) when env vars are valid.
+- WebSocket: `curl -sS -X POST http://localhost:3000/api/conversation/session -H 'Content-Type: application/json' -d '{"connectionType":"websocket"}' | jq` → `signedUrl`.
 - With `APP_SESSION_SECRET` set, send `Authorization: Bearer <same value as in .env>` (and set `NEXT_PUBLIC_CONVERSATION_BEARER` in `.env.local` for the browser).
 
 ## Browser
 
 1. Run `npm run dev`, open `http://localhost:3000`.
-2. **Start session** — allow microphone when prompted.
-3. Speak — you should hear the agent and see lines in **Transcript**.
-4. **Stop** — session ends; transcript remains until the next start. Use **Stop** before closing the tab so the agent session tears down cleanly.
-5. Deny microphone — expect a clear error message.
-6. Invalid or missing API key on server — expect a JSON error from the API (and UI message after Start).
+2. If you see **"could not establish pc connection"**, console errors about **`/rtc/v1`** or **LiveKit**, enable **"Use WebSocket transport"** on the page (or set `NEXT_PUBLIC_ELEVENLABS_CONNECTION=websocket` in `.env.local`). Optionally try `NEXT_PUBLIC_ELEVENLABS_SERVER_LOCATION=eu-residency` (or `in-residency`) if your ElevenLabs project uses that region.
+3. **Start session** — allow microphone when prompted.
+4. Speak — you should hear the agent and see lines in **Transcript**.
+5. **Stop** — session ends; transcript remains until the next start. Use **Stop** before closing the tab so the agent session tears down cleanly.
+6. Deny microphone — expect a clear error message.
+7. Invalid or missing API key on server — expect a JSON error from the API (and UI message after Start).
 
 ## Automated tests
 

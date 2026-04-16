@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mintConversationToken } from "./elevenlabsSession";
+import { mintConversationToken, mintSignedUrl } from "./elevenlabsSession";
 
 describe("mintConversationToken", () => {
   it("returns token on success", async () => {
@@ -39,5 +39,23 @@ describe("mintConversationToken", () => {
       expect(result.code).toBe("ELEVENLABS_QUOTA");
       expect(result.status).toBe(429);
     }
+  });
+
+  it("returns signed_url on success", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      text: async () => JSON.stringify({ signed_url: "wss://example/signed" }),
+    });
+
+    const result = await mintSignedUrl(
+      "test-key",
+      "agent_123",
+      fetchMock as unknown as typeof fetch,
+    );
+
+    expect(result.ok && result.signedUrl).toBe("wss://example/signed");
+    const [reqUrl] = fetchMock.mock.calls[0] as [URL];
+    expect(String(reqUrl)).toContain("get-signed-url");
+    expect(String(reqUrl)).toContain("agent_id=agent_123");
   });
 });

@@ -10,6 +10,24 @@ import {
 import { useCallback, useMemo, useState } from "react";
 import { Transcript, type TranscriptLine } from "./Transcript";
 
+const SERVER_LOCATION = (() => {
+  const sl = process.env.NEXT_PUBLIC_ELEVENLABS_SERVER_LOCATION;
+  if (
+    sl === "us" ||
+    sl === "eu-residency" ||
+    sl === "in-residency" ||
+    sl === "global"
+  ) {
+    return sl;
+  }
+  return undefined;
+})();
+
+const ENV_PREFER_WEBSOCKET =
+  process.env.NEXT_PUBLIC_ELEVENLABS_CONNECTION === "websocket";
+
+const WS_STORAGE_KEY = "elevenlabs_prefer_websocket";
+
 type MessagePayload = Parameters<
   NonNullable<HookCallbacks["onMessage"]>
 >[0];
@@ -40,6 +58,11 @@ function VoicePanel({
   const [micError, setMicError] = useState<string | null>(null);
   const [isFetchingToken, setIsFetchingToken] = useState(false);
   const [volume, setVolumeState] = useState(1);
+  const [preferWebSocket, setPreferWebSocket] = useState(() => {
+    if (typeof window === "undefined") return ENV_PREFER_WEBSOCKET;
+    if (ENV_PREFER_WEBSOCKET) return true;
+    return window.sessionStorage.getItem(WS_STORAGE_KEY) === "1";
+  });
 
   const bearer = process.env.NEXT_PUBLIC_CONVERSATION_BEARER;
 
@@ -67,13 +90,19 @@ function VoicePanel({
         headers.Authorization = `Bearer ${bearer}`;
       }
 
+      const connectionType = preferWebSocket ? "websocket" : "webrtc";
       const res = await fetch("/api/conversation/session", {
         method: "POST",
-        headers,
+        headers: {
+          ...headers,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ connectionType }),
       });
 
       const data = (await res.json()) as {
         conversationToken?: string;
+        signedUrl?: string;
         error?: string;
         code?: string;
       };
@@ -90,18 +119,31 @@ function VoicePanel({
         return;
       }
 
-      const token = data.conversationToken;
-      if (!token) {
-        setFetchError("Server did not return a conversation token.");
-        setIsFetchingToken(false);
-        return;
+      if (connectionType === "websocket") {
+        const signedUrl = data.signedUrl;
+        if (!signedUrl) {
+          setFetchError("Server did not return a signed URL for WebSocket.");
+          setIsFetchingToken(false);
+          return;
+        }
+        startSession({
+          signedUrl,
+          connectionType: "websocket",
+          userId: stableUserId(),
+        });
+      } else {
+        const token = data.conversationToken;
+        if (!token) {
+          setFetchError("Server did not return a conversation token.");
+          setIsFetchingToken(false);
+          return;
+        }
+        startSession({
+          conversationToken: token,
+          connectionType: "webrtc",
+          userId: stableUserId(),
+        });
       }
-
-      startSession({
-        conversationToken: token,
-        connectionType: "webrtc",
-        userId: stableUserId(),
-      });
     } catch {
       setFetchError(
         "Network error while starting the session. Check your connection.",
@@ -109,7 +151,7 @@ function VoicePanel({
     } finally {
       setIsFetchingToken(false);
     }
-  }, [bearer, onClearTranscript, startSession]);
+  }, [bearer, onClearTranscript, preferWebSocket, startSession]);
 
   const stop = useCallback(() => {
     endSession();
@@ -172,6 +214,29 @@ function VoicePanel({
             {micError || fetchError || statusMessage}
           </div>
         )}
+
+        <label className="mt-6 flex cursor-pointer items-start gap-3 text-sm leading-snug text-zinc-600 dark:text-zinc-400">
+          <input
+            type="checkbox"
+            checked={preferWebSocket}
+            onChange={(e) => {
+              const on = e.target.checked;
+              setPreferWebSocket(on);
+              if (typeof window !== "undefined") {
+                if (on) window.sessionStorage.setItem(WS_STORAGE_KEY, "1");
+                else window.sessionStorage.removeItem(WS_STORAGE_KEY);
+              }
+            }}
+            className="mt-1 h-4 w-4 rounded border-zinc-400 text-emerald-600 focus:ring-emerald-500"
+          />
+          <span>
+            Use <strong className="text-zinc-800 dark:text-zinc-200">WebSocket</strong>{" "}
+            transport instead of WebRTC. Turn this on if you see errors like
+            &quot;could not establish pc connection&quot;,{" "}
+            <code className="text-xs text-zinc-500">rtc/v1</code> 404, or LiveKit
+            warnings in the console.
+          </span>
+        </label>
 
         <div className="mt-8 flex flex-col gap-4 sm:flex-row sm:items-center">
           <button
@@ -255,7 +320,10 @@ export function VoiceAgentApp() {
   const onClearTranscript = useCallback(() => setMessages([]), []);
 
   return (
-    <ConversationProvider onMessage={onMessage}>
+    <ConversationProvider
+      onMessage={onMessage}
+      {...(SERVER_LOCATION ? { serverLocation: SERVER_LOCATION } : {})}
+    >
       <VoicePanel messages={messages} onClearTranscript={onClearTranscript} />
     </ConversationProvider>
   );
