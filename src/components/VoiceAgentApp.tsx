@@ -3,12 +3,12 @@
 import {
   ConversationProvider,
   useConversationControls,
+  useConversationInput,
   useConversationMode,
   useConversationStatus,
-  type HookCallbacks,
 } from "@elevenlabs/react";
-import { useCallback, useMemo, useState } from "react";
-import { Transcript, type TranscriptLine } from "./Transcript";
+import { VoiceProvider, useVoice } from "@humeai/voice-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 const SERVER_LOCATION = (() => {
   const sl = process.env.NEXT_PUBLIC_ELEVENLABS_SERVER_LOCATION;
@@ -23,14 +23,29 @@ const SERVER_LOCATION = (() => {
   return undefined;
 })();
 
-const ENV_PREFER_WEBSOCKET =
-  process.env.NEXT_PUBLIC_ELEVENLABS_CONNECTION === "websocket";
+type ProviderId = "elevenlabs" | "hume";
 
-const WS_STORAGE_KEY = "elevenlabs_prefer_websocket";
+type VoiceController = {
+  providerLabel: string;
+  transportLabel: string;
+  statusLabel: string;
+  busy: boolean;
+  connected: boolean;
+  isMuted: boolean;
+  volume: number;
+  error: string | null;
+  startStopLabel: string;
+  canStartStop: boolean;
+  canMute: boolean;
+  onStartStop: () => void;
+  onToggleMute: () => void;
+  onVolumeChange: (volume: number) => void;
+};
 
-type MessagePayload = Parameters<
-  NonNullable<HookCallbacks["onMessage"]>
->[0];
+const PROVIDER_TABS: Array<{ id: ProviderId; label: string }> = [
+  { id: "elevenlabs", label: "ElevenLabs" },
+  { id: "hume", label: "Hume AI" },
+];
 
 function stableUserId(): string {
   if (typeof window === "undefined") return "server";
@@ -43,14 +58,104 @@ function stableUserId(): string {
   return id;
 }
 
-function VoicePanel({
-  messages,
-  onClearTranscript,
+function VoiceCallShell({
+  controller,
 }: {
-  messages: TranscriptLine[];
-  onClearTranscript: () => void;
+  controller: VoiceController;
 }) {
+  const orbStateClass = controller.connected
+    ? controller.statusLabel.includes("speaking")
+      ? "voice-orb-speaking"
+      : "voice-orb-listening"
+    : controller.busy
+      ? "voice-orb-connecting"
+      : "voice-orb-idle";
+
+  return (
+    <div className="mx-auto flex min-h-screen w-full max-w-4xl flex-col items-center justify-between px-6 py-10 text-zinc-100">
+      <div className="flex w-full items-center justify-between text-xs font-medium text-zinc-400">
+        <span className="inline-flex items-center gap-2">
+          <span
+            className={`h-2 w-2 rounded-full ${
+              controller.connected
+                ? "bg-emerald-400"
+                : controller.busy
+                  ? "animate-pulse bg-amber-400"
+                  : "bg-zinc-500"
+            }`}
+            aria-hidden
+          />
+          {controller.statusLabel}
+        </span>
+        <span>{controller.transportLabel}</span>
+      </div>
+
+      <main className="flex w-full flex-1 flex-col items-center justify-center gap-8">
+        <div
+          className={`voice-orb ${orbStateClass}`}
+          role="status"
+          aria-live="polite"
+          aria-label={`${controller.providerLabel} ${controller.statusLabel}`}
+        >
+          <div className="voice-orb-core" />
+        </div>
+
+        {controller.error && (
+          <div
+            className="w-full max-w-xl rounded-xl border border-red-900/60 bg-red-950/40 px-4 py-3 text-sm text-red-200"
+            role="alert"
+          >
+            {controller.error}
+          </div>
+        )}
+
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={controller.onStartStop}
+            disabled={!controller.canStartStop || controller.busy}
+            className="inline-flex h-16 min-w-[180px] items-center justify-center rounded-full bg-emerald-500 px-8 text-base font-semibold text-emerald-950 shadow-lg transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {controller.startStopLabel}
+          </button>
+
+          <button
+            type="button"
+            onClick={controller.onToggleMute}
+            disabled={!controller.canMute}
+            className="inline-flex h-16 min-w-[140px] items-center justify-center rounded-full border border-zinc-700 bg-zinc-900/60 px-6 text-sm font-semibold text-zinc-100 transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {controller.isMuted ? "Unmute mic" : "Mute mic"}
+          </button>
+        </div>
+
+        <div className="w-full max-w-xl">
+          <label
+            htmlFor={`${controller.providerLabel}-agent-volume`}
+            className="text-xs font-medium uppercase tracking-wide text-zinc-400"
+          >
+            Agent volume
+          </label>
+          <input
+            id={`${controller.providerLabel}-agent-volume`}
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={controller.volume}
+            onChange={(e) => controller.onVolumeChange(Number(e.target.value))}
+            disabled={!controller.connected}
+            className="mt-2 w-full accent-emerald-500 disabled:opacity-50"
+          />
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function useElevenLabsAdapter(): VoiceController {
   const { startSession, endSession, setVolume } = useConversationControls();
+  const { isMuted, setMuted } = useConversationInput();
   const { status, message: statusMessage } = useConversationStatus();
   const { mode, isSpeaking, isListening } = useConversationMode();
 
@@ -58,18 +163,13 @@ function VoicePanel({
   const [micError, setMicError] = useState<string | null>(null);
   const [isFetchingToken, setIsFetchingToken] = useState(false);
   const [volume, setVolumeState] = useState(1);
-  const [preferWebSocket, setPreferWebSocket] = useState(() => {
-    if (typeof window === "undefined") return ENV_PREFER_WEBSOCKET;
-    if (ENV_PREFER_WEBSOCKET) return true;
-    return window.sessionStorage.getItem(WS_STORAGE_KEY) === "1";
-  });
 
   const bearer = process.env.NEXT_PUBLIC_CONVERSATION_BEARER;
 
   const busy = isFetchingToken || status === "connecting";
+  const connected = status === "connected";
 
   const start = useCallback(async () => {
-    onClearTranscript();
     setFetchError(null);
     setMicError(null);
     setIsFetchingToken(true);
@@ -90,18 +190,16 @@ function VoicePanel({
         headers.Authorization = `Bearer ${bearer}`;
       }
 
-      const connectionType = preferWebSocket ? "websocket" : "webrtc";
       const res = await fetch("/api/conversation/session", {
         method: "POST",
         headers: {
           ...headers,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ connectionType }),
+        body: JSON.stringify({ connectionType: "websocket" }),
       });
 
       const data = (await res.json()) as {
-        conversationToken?: string;
         signedUrl?: string;
         error?: string;
         code?: string;
@@ -119,31 +217,17 @@ function VoicePanel({
         return;
       }
 
-      if (connectionType === "websocket") {
-        const signedUrl = data.signedUrl;
-        if (!signedUrl) {
-          setFetchError("Server did not return a signed URL for WebSocket.");
-          setIsFetchingToken(false);
-          return;
-        }
-        startSession({
-          signedUrl,
-          connectionType: "websocket",
-          userId: stableUserId(),
-        });
-      } else {
-        const token = data.conversationToken;
-        if (!token) {
-          setFetchError("Server did not return a conversation token.");
-          setIsFetchingToken(false);
-          return;
-        }
-        startSession({
-          conversationToken: token,
-          connectionType: "webrtc",
-          userId: stableUserId(),
-        });
+      const signedUrl = data.signedUrl;
+      if (!signedUrl) {
+        setFetchError("Server did not return a signed URL for WebSocket.");
+        setIsFetchingToken(false);
+        return;
       }
+      startSession({
+        signedUrl,
+        connectionType: "websocket",
+        userId: stableUserId(),
+      });
     } catch {
       setFetchError(
         "Network error while starting the session. Check your connection.",
@@ -151,7 +235,7 @@ function VoicePanel({
     } finally {
       setIsFetchingToken(false);
     }
-  }, [bearer, onClearTranscript, preferWebSocket, startSession]);
+  }, [bearer, startSession]);
 
   const stop = useCallback(() => {
     endSession();
@@ -173,158 +257,217 @@ function VoicePanel({
 
   const canStart = status === "disconnected" || status === "error";
   const canStop = status === "connected" || status === "connecting";
+  const showError =
+    fetchError || micError || (status === "error" && statusMessage);
 
-  return (
-    <div className="flex w-full max-w-2xl flex-col gap-6">
-      <div className="rounded-3xl border border-zinc-200/90 bg-white/90 p-8 shadow-sm backdrop-blur-sm dark:border-zinc-700/90 dark:bg-zinc-950/80">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <h1 className="text-xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-              Voice agent
-            </h1>
-            <p className="mt-1 max-w-md text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
-              Start a session to talk with your ElevenLabs agent. Audio stays
-              in the browser; only a short-lived token is issued from this app.
-            </p>
-          </div>
-          <div
-            className="mt-2 inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-zinc-50 px-3 py-1 text-xs font-medium text-zinc-700 dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200 sm:mt-0"
-            role="status"
-            aria-live="polite"
-          >
-            <span
-              className={`h-2 w-2 rounded-full ${
-                status === "connected"
-                  ? "bg-emerald-500"
-                  : busy
-                    ? "animate-pulse bg-amber-500"
-                    : "bg-zinc-400"
-              }`}
-              aria-hidden
-            />
-            {statusLabel}
-          </div>
-        </div>
+  useEffect(() => {
+    if (!connected) return;
+    try {
+      setVolume({ volume });
+    } catch {
+      // Ignore occasional race while the session is finishing connection setup.
+    }
+  }, [connected, setVolume, volume]);
 
-        {(fetchError || micError || (status === "error" && statusMessage)) && (
-          <div
-            className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-100"
-            role="alert"
-          >
-            {micError || fetchError || statusMessage}
-          </div>
-        )}
+  return {
+    providerLabel: "ElevenLabs",
+    transportLabel: "WebSocket mode",
+    statusLabel,
+    busy,
+    connected,
+    isMuted,
+    volume,
+    error: showError || null,
+    startStopLabel: busy ? "Connecting..." : canStart ? "Start voice call" : "End call",
+    canStartStop: canStart || canStop,
+    canMute: canStop,
+    onStartStop: canStart ? start : stop,
+    onToggleMute: () => setMuted(!isMuted),
+    onVolumeChange: (v: number) => {
+      setVolumeState(v);
+      if (connected) {
+        try {
+          setVolume({ volume: v });
+        } catch {
+          // Ignore when no active session yet.
+        }
+      }
+    },
+  };
+}
 
-        <label className="mt-6 flex cursor-pointer items-start gap-3 text-sm leading-snug text-zinc-600 dark:text-zinc-400">
-          <input
-            type="checkbox"
-            checked={preferWebSocket}
-            onChange={(e) => {
-              const on = e.target.checked;
-              setPreferWebSocket(on);
-              if (typeof window !== "undefined") {
-                if (on) window.sessionStorage.setItem(WS_STORAGE_KEY, "1");
-                else window.sessionStorage.removeItem(WS_STORAGE_KEY);
-              }
-            }}
-            className="mt-1 h-4 w-4 rounded border-zinc-400 text-emerald-600 focus:ring-emerald-500"
-          />
-          <span>
-            Use <strong className="text-zinc-800 dark:text-zinc-200">WebSocket</strong>{" "}
-            transport instead of WebRTC. Turn this on if you see errors like
-            &quot;could not establish pc connection&quot;,{" "}
-            <code className="text-xs text-zinc-500">rtc/v1</code> 404, or LiveKit
-            warnings in the console.
-          </span>
-        </label>
+function ElevenLabsPanel() {
+  const controller = useElevenLabsAdapter();
+  return <VoiceCallShell controller={controller} />;
+}
 
-        <div className="mt-8 flex flex-col gap-4 sm:flex-row sm:items-center">
-          <button
-            type="button"
-            onClick={start}
-            disabled={!canStart || busy}
-            className="inline-flex h-12 min-w-[140px] items-center justify-center rounded-full bg-emerald-600 px-6 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {busy ? "Please wait…" : "Start session"}
-          </button>
-          <button
-            type="button"
-            onClick={stop}
-            disabled={!canStop}
-            className="inline-flex h-12 min-w-[140px] items-center justify-center rounded-full border border-zinc-300 bg-transparent px-6 text-sm font-semibold text-zinc-800 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-100 dark:hover:bg-zinc-900"
-          >
-            Stop
-          </button>
-        </div>
+function useHumeAdapter(): VoiceController {
+  const {
+    connect,
+    disconnect,
+    status,
+    isMuted,
+    mute,
+    unmute,
+    volume,
+    setVolume,
+    isPlaying,
+    error,
+  } = useVoice();
 
-        <div className="mt-8">
-          <label
-            htmlFor="agent-volume"
-            className="text-xs font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400"
-          >
-            Agent volume
-          </label>
-          <input
-            id="agent-volume"
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={volume}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              setVolumeState(v);
-              setVolume({ volume: v });
-            }}
-            className="mt-2 w-full accent-emerald-600"
-          />
-        </div>
-      </div>
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [isFetchingToken, setIsFetchingToken] = useState(false);
+  const bearer = process.env.NEXT_PUBLIC_CONVERSATION_BEARER;
 
-      <Transcript messages={messages} />
-    </div>
-  );
+  const connected = status.value === "connected";
+  const busy = isFetchingToken || status.value === "connecting";
+
+  const start = useCallback(async () => {
+    setFetchError(null);
+    setMicError(null);
+    setIsFetchingToken(true);
+
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      setMicError(
+        "Microphone access was denied or is unavailable. Allow microphone use for this site and try again.",
+      );
+      setIsFetchingToken(false);
+      return;
+    }
+
+    try {
+      const headers: HeadersInit = { "Content-Type": "application/json" };
+      if (bearer) {
+        headers.Authorization = `Bearer ${bearer}`;
+      }
+
+      const response = await fetch("/api/hume/access-token", {
+        method: "POST",
+        headers,
+      });
+
+      const data = (await response.json()) as {
+        accessToken?: string;
+        configId?: string;
+        error?: string;
+      };
+
+      if (!response.ok) {
+        setFetchError(data.error || `Request failed (${response.status})`);
+        setIsFetchingToken(false);
+        return;
+      }
+
+      if (!data.accessToken) {
+        setFetchError("Server did not return a Hume access token.");
+        setIsFetchingToken(false);
+        return;
+      }
+
+      await connect({
+        auth: { type: "accessToken", value: data.accessToken },
+        ...(data.configId ? { configId: data.configId } : {}),
+      });
+    } catch {
+      setFetchError(
+        "Network error while starting Hume session. Check your connection.",
+      );
+    } finally {
+      setIsFetchingToken(false);
+    }
+  }, [bearer, connect]);
+
+  const stop = useCallback(() => {
+    void disconnect();
+  }, [disconnect]);
+
+  const statusLabel = useMemo(() => {
+    if (isFetchingToken) return "Preparing…";
+    if (status.value === "connecting") return "Connecting…";
+    if (status.value === "connected") {
+      return isPlaying ? "Agent speaking" : "Listening…";
+    }
+    if (status.value === "error") return `Error: ${status.reason}`;
+    return "Ready";
+  }, [isFetchingToken, isPlaying, status.reason, status.value]);
+
+  const canStart = status.value === "disconnected" || status.value === "error";
+  const canStop = status.value === "connected" || status.value === "connecting";
+  const showError =
+    fetchError || micError || (status.value === "error" ? status.reason : null);
+  const normalizedVolume = Number.isFinite(volume) ? volume : 1;
+
+  return {
+    providerLabel: "Hume AI",
+    transportLabel: "EVI WebSocket mode",
+    statusLabel,
+    busy,
+    connected,
+    isMuted,
+    volume: normalizedVolume,
+    error:
+      showError ||
+      (error
+        ? `${error.message || "Hume voice error"}`
+        : null),
+    startStopLabel: busy ? "Connecting..." : canStart ? "Start voice call" : "End call",
+    canStartStop: canStart || canStop,
+    canMute: canStop,
+    onStartStop: canStart ? start : stop,
+    onToggleMute: () => {
+      if (isMuted) unmute();
+      else mute();
+    },
+    onVolumeChange: (v: number) => {
+      if (!connected) return;
+      setVolume(v);
+    },
+  };
+}
+
+function HumePanel() {
+  const controller = useHumeAdapter();
+  return <VoiceCallShell controller={controller} />;
 }
 
 export function VoiceAgentApp() {
-  const [messages, setMessages] = useState<TranscriptLine[]>([]);
-
-  const onMessage = useCallback((props: MessagePayload) => {
-    const text = props.message?.trim();
-    if (!text) return;
-
-    setMessages((prev) => {
-      const last = prev[prev.length - 1];
-      if (
-        last &&
-        props.event_id !== undefined &&
-        last.eventId === props.event_id
-      ) {
-        return [...prev.slice(0, -1), { ...last, text: props.message }];
-      }
-      return [
-        ...prev,
-        {
-          id:
-            props.event_id !== undefined
-              ? `evt-${props.event_id}`
-              : crypto.randomUUID(),
-          role: props.role,
-          text: props.message,
-          eventId: props.event_id,
-        },
-      ];
-    });
-  }, []);
-
-  const onClearTranscript = useCallback(() => setMessages([]), []);
+  const [activeProvider, setActiveProvider] = useState<ProviderId>("elevenlabs");
 
   return (
-    <ConversationProvider
-      onMessage={onMessage}
-      {...(SERVER_LOCATION ? { serverLocation: SERVER_LOCATION } : {})}
-    >
-      <VoicePanel messages={messages} onClearTranscript={onClearTranscript} />
-    </ConversationProvider>
+    <div className="w-full">
+      <div className="mx-auto mt-6 flex w-full max-w-4xl justify-center px-6">
+        <div className="inline-flex rounded-full border border-zinc-700/70 bg-zinc-900/70 p-1">
+          {PROVIDER_TABS.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveProvider(tab.id)}
+              className={`rounded-full px-5 py-2 text-sm font-medium transition ${
+                activeProvider === tab.id
+                  ? "bg-emerald-500 text-emerald-950"
+                  : "text-zinc-300 hover:text-white"
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {activeProvider === "elevenlabs" ? (
+        <ConversationProvider
+          {...(SERVER_LOCATION ? { serverLocation: SERVER_LOCATION } : {})}
+        >
+          <ElevenLabsPanel />
+        </ConversationProvider>
+      ) : (
+        <VoiceProvider>
+          <HumePanel />
+        </VoiceProvider>
+      )}
+    </div>
   );
 }
