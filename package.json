@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "vitest run"
+    "test": "vitest run",
+    "twilio:stream": "node scripts/twilio-media-server.mjs"
   },
   "dependencies": {
     "@elevenlabs/react": "^1.1.1",
@@ -15,7 +16,9 @@
     "hume": "^0.15.16",
     "next": "16.2.4",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "twilio": "^5.13.1",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local phone provider override for Twilio bridge
+/data/phone-provider.json

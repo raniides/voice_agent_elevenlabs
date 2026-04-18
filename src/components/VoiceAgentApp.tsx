@@ -9,6 +9,7 @@ import {
 } from "@elevenlabs/react";
 import { VoiceProvider, useVoice } from "@humeai/voice-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { PhoneTwilioCard } from "./PhoneTwilioCard";
 
 const SERVER_LOCATION = (() => {
   const sl = process.env.NEXT_PUBLIC_ELEVENLABS_SERVER_LOCATION;
@@ -468,6 +469,8 @@ export function VoiceAgentApp() {
           <HumePanel />
         </VoiceProvider>
       )}
+
+      <PhoneTwilioCard />
     </div>
   );
 }
